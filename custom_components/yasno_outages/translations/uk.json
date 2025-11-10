@@ -22,6 +22,15 @@
         "data_description": {
           "group": "Знайдіть свою групу на: https://static.yasno.ua/kyiv/outages"
         }
+      },
+      "calendar": {
+        "title": "Налаштування Yasno Відключення",
+        "data": {
+          "calendar_entity": "Сутність календаря (опціонально):"
+        },
+        "data_description": {
+          "calendar_entity": "Оберіть календар для синхронізації подій відключень (наприклад, calendar.yuriy_bekh_gmail_com). Залиште пусто, щоб пропустити."
+        }
       }
     }
   },
@@ -46,6 +55,15 @@
         },
         "data_description": {
           "group": "Знайдіть свою групу на: https://static.yasno.ua/kyiv/outages"
+        }
+      },
+      "calendar": {
+        "title": "Налаштування Yasno Відключення",
+        "data": {
+          "calendar_entity": "Сутність календаря (опціонально):"
+        },
+        "data_description": {
+          "calendar_entity": "Оберіть календар для синхронізації подій відключень (наприклад, calendar.yuriy_bekh_gmail_com). Залиште пусто, щоб пропустити."
         }
       }
     }

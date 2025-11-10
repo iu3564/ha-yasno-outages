@@ -9,6 +9,7 @@ NAME: Final = "Yasno Outages"
 CONF_REGION: Final = "region"
 CONF_PROVIDER: Final = "provider"
 CONF_GROUP: Final = "group"
+CONF_CALENDAR: Final = "calendar_entity"
 CONF_CITY: Final = "city"  # Deprecated, use CONF_REGION
 CONF_SERVICE: Final = "service"  # Deprecated, use CONF_PROVIDER
 
@@ -47,6 +48,9 @@ API_KEY_TODAY: Final = "today"
 API_KEY_TOMORROW: Final = "tomorrow"
 API_KEY_STATUS: Final = "status"
 API_KEY_DATE: Final = "date"
+
+# Calendar sync
+CALENDAR_SYNC_TIME_TOLERANCE: Final = 60  # seconds
 
 # Keys
 TRANSLATION_KEY_EVENT_OUTAGE: Final = f"component.{DOMAIN}.common.electricity_outage"

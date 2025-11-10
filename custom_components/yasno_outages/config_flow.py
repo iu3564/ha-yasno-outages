@@ -12,12 +12,15 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
     SelectSelector,
     SelectSelectorConfig,
 )
 
 from .api import YasnoOutagesApi
 from .const import (
+    CONF_CALENDAR,
     CONF_GROUP,
     CONF_PROVIDER,
     CONF_REGION,
@@ -110,6 +113,22 @@ def build_group_schema(
     )
 
 
+def build_calendar_schema(
+    config_entry: ConfigEntry | None,
+) -> vol.Schema:
+    """Build the schema for the calendar selection step."""
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_CALENDAR,
+                default=get_config_value(config_entry, CONF_CALENDAR),
+            ): EntitySelector(
+                EntitySelectorConfig(domain="calendar"),
+            ),
+        },
+    )
+
+
 class YasnoOutagesOptionsFlow(OptionsFlow):
     """Handle options flow for Yasno Outages."""
 
@@ -164,12 +183,7 @@ class YasnoOutagesOptionsFlow(OptionsFlow):
         if user_input is not None:
             LOGGER.debug("Group selected: %s", user_input)
             self.data.update(user_input)
-            # Update entry title along with options
-            self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                title=build_entry_title(self.data),
-            )
-            return self.async_create_entry(title="", data=self.data)
+            return await self.async_step_calendar()
 
         # Fetch groups for the selected region/provider
         region = self.data[CONF_REGION]
@@ -189,6 +203,26 @@ class YasnoOutagesOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="group",
             data_schema=build_group_schema(groups, self.config_entry),
+        )
+
+    async def async_step_calendar(
+        self,
+        user_input: dict | None = None,
+    ) -> ConfigFlowResult:
+        """Handle the optional calendar selection."""
+        if user_input is not None:
+            LOGGER.debug("Calendar selected: %s", user_input)
+            self.data.update(user_input)
+            # Update entry title along with options
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                title=build_entry_title(self.data),
+            )
+            return self.async_create_entry(title="", data=self.data)
+
+        return self.async_show_form(
+            step_id="calendar",
+            data_schema=build_calendar_schema(self.config_entry),
         )
 
 
@@ -260,8 +294,7 @@ class YasnoOutagesConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             LOGGER.debug("User input: %s", user_input)
             self.data.update(user_input)
-            title = build_entry_title(self.data)
-            return self.async_create_entry(title=title, data=self.data)
+            return await self.async_step_calendar()
 
         # Fetch groups for the selected region/provider
         region = self.data[CONF_REGION]
@@ -281,4 +314,20 @@ class YasnoOutagesConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="group",
             data_schema=build_group_schema(groups, None),
+        )
+
+    async def async_step_calendar(
+        self,
+        user_input: dict | None = None,
+    ) -> ConfigFlowResult:
+        """Handle the calendar step."""
+        if user_input is not None:
+            LOGGER.debug("Calendar selected: %s", user_input)
+            self.data.update(user_input)
+            title = build_entry_title(self.data)
+            return self.async_create_entry(title=title, data=self.data)
+
+        return self.async_show_form(
+            step_id="calendar",
+            data_schema=build_calendar_schema(None),
         )

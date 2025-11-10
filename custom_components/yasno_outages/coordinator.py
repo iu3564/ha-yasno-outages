@@ -15,6 +15,8 @@ from .const import (
     API_STATUS_EMERGENCY_SHUTDOWNS,
     API_STATUS_SCHEDULE_APPLIES,
     API_STATUS_WAITING_FOR_SCHEDULE,
+    CALENDAR_SYNC_TIME_TOLERANCE,
+    CONF_CALENDAR,
     CONF_GROUP,
     CONF_PROVIDER,
     CONF_REGION,
@@ -159,6 +161,9 @@ class YasnoOutagesCoordinator(DataUpdateCoordinator):
 
         # Fetch outages data (now async with aiohttp, not blocking)
         await self.api.fetch_data()
+
+        # Sync events to external calendar if configured
+        await self.async_sync_events_to_calendar()
 
     async def async_fetch_translations(self) -> None:
         """Fetch translations."""
@@ -316,3 +321,123 @@ class YasnoOutagesCoordinator(DataUpdateCoordinator):
 
         # Add more provider simplifications here as needed
         return provider_name
+
+    async def async_sync_events_to_calendar(self) -> None:
+        """Sync events to external calendar if configured."""
+        calendar_entity = self.config_entry.options.get(
+            CONF_CALENDAR,
+            self.config_entry.data.get(CONF_CALENDAR),
+        )
+
+        if not calendar_entity:
+            LOGGER.debug("No calendar entity configured for sync")
+            return
+
+        try:
+            LOGGER.debug("Syncing events to calendar: %s", calendar_entity)
+
+            # Get events for today and tomorrow + a week ahead
+            now = dt_utils.now()
+            end_date = now + datetime.timedelta(days=8)
+            events = self.get_events_between(now, end_date)
+
+            # Get the calendar service
+            if "calendar" not in self.hass.services.async_services():
+                LOGGER.warning("Calendar service not available")
+                return
+
+            # Get existing events from the calendar
+            try:
+                existing_events = await self._get_calendar_events(
+                    calendar_entity, now, end_date
+                )
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("Could not retrieve existing calendar events")
+                existing_events = []
+
+            # Create events in the calendar (skip duplicates)
+            for event in events:
+                # Check if event already exists
+                if not self._event_exists(event, existing_events):
+                    await self._create_calendar_event(calendar_entity, event)
+                else:
+                    LOGGER.debug("Event already exists, skipping: %s", event.summary)
+
+        except Exception:
+            LOGGER.exception("Failed to sync events to calendar")
+
+    async def _get_calendar_events(
+        self,
+        calendar_entity: str,
+        start_date: datetime.datetime,
+        end_date: datetime.datetime,
+    ) -> list[dict]:
+        """Get events from the external calendar."""
+        try:
+            # Use calendar.get_events service to fetch existing events
+            response = await self.hass.services.async_call(
+                "calendar",
+                "get_events",
+                {
+                    "entity_id": calendar_entity,
+                    "duration": {
+                        "days": (end_date - start_date).days + 1,
+                    },
+                },
+                return_response=True,
+            )
+            events = response.get(calendar_entity, {}).get("events", [])
+            LOGGER.debug("Retrieved %d existing events from calendar", len(events))
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Could not fetch events from calendar")
+            return []
+        else:
+            return events
+
+    def _event_exists(self, event: CalendarEvent, existing_events: list[dict]) -> bool:
+        """Check if event already exists in the calendar."""
+        # Match by start time and summary (allows for slight time variations)
+        for existing in existing_events:
+            existing_start = existing.get("start")
+            existing_summary = existing.get("summary", "")
+
+            if existing_start and existing_summary == event.summary:
+                # Compare times (allow tolerance for time differences)
+                try:
+                    if isinstance(existing_start, str):
+                        existing_dt = dt_utils.parse_datetime(existing_start)
+                    else:
+                        existing_dt = existing_start
+
+                    if (
+                        existing_dt
+                        and abs((existing_dt - event.start).total_seconds())
+                        < CALENDAR_SYNC_TIME_TOLERANCE
+                    ):
+                        return True
+                except Exception:  # noqa: BLE001
+                    LOGGER.debug("Could not compare event times")
+                    continue
+
+        return False
+
+    async def _create_calendar_event(
+        self, calendar_entity: str, event: CalendarEvent
+    ) -> None:
+        """Create an event in the external calendar."""
+        try:
+            # Use calendar service to create event
+            await self.hass.services.async_call(
+                "calendar",
+                "create_event",
+                {
+                    "entity_id": calendar_entity,
+                    "summary": event.summary,
+                    "description": event.description,
+                    "start_date_time": event.start.isoformat(),
+                    "end_date_time": event.end.isoformat(),
+                },
+            )
+            LOGGER.debug("Created event in calendar: %s", event.summary)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Could not create event")

@@ -22,6 +22,15 @@
         "data_description": {
           "group": "You can find your group at: https://static.yasno.ua/kyiv/outages"
         }
+      },
+      "calendar": {
+        "title": "Yasno Outages Settings",
+        "data": {
+          "calendar_entity": "Calendar entity (optional):"
+        },
+        "data_description": {
+          "calendar_entity": "Select a calendar to sync outage events to (e.g., calendar.yuriy_bekh_gmail_com). Leave empty to skip."
+        }
       }
     }
   },
@@ -46,6 +55,15 @@
         },
         "data_description": {
           "group": "You can find your group at: https://static.yasno.ua/kyiv/outages"
+        }
+      },
+      "calendar": {
+        "title": "Yasno Outages Settings",
+        "data": {
+          "calendar_entity": "Calendar entity (optional):"
+        },
+        "data_description": {
+          "calendar_entity": "Select a calendar to sync outage events to (e.g., calendar.yuriy_bekh_gmail_com). Leave empty to skip."
         }
       }
     }
