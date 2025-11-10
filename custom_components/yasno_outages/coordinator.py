@@ -1,11 +1,16 @@
 """Coordinator for Yasno outages integration."""
 
+from __future__ import annotations
+
 import datetime
 import logging
+from contextlib import suppress
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.calendar import CalendarEvent
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.translation import async_get_translations
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_utils
@@ -15,7 +20,6 @@ from .const import (
     API_STATUS_EMERGENCY_SHUTDOWNS,
     API_STATUS_SCHEDULE_APPLIES,
     API_STATUS_WAITING_FOR_SCHEDULE,
-    CALENDAR_SYNC_TIME_TOLERANCE,
     CONF_CALENDAR,
     CONF_GROUP,
     CONF_PROVIDER,
@@ -33,20 +37,21 @@ from .const import (
     UPDATE_INTERVAL,
 )
 
+if TYPE_CHECKING:
+    from .data import YasnoOutagesConfigEntry
+
 LOGGER = logging.getLogger(__name__)
 
-TIMEFRAME_TO_CHECK = datetime.timedelta(hours=24)
+TIMEFRAME_TO_CHECK = timedelta(hours=24)
 
 
 class YasnoOutagesCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Yasno outages data."""
-
-    config_entry: ConfigEntry
+    """Coordinator for Yasno Outages data."""
 
     def __init__(
         self,
         hass: HomeAssistant,
-        config_entry: ConfigEntry,
+        config_entry: YasnoOutagesConfigEntry,
         api: YasnoOutagesApi,
     ) -> None:
         """Initialize the coordinator."""
@@ -54,61 +59,22 @@ class YasnoOutagesCoordinator(DataUpdateCoordinator):
             hass,
             LOGGER,
             name=DOMAIN,
-            update_interval=datetime.timedelta(minutes=UPDATE_INTERVAL),
+            update_interval=timedelta(minutes=UPDATE_INTERVAL),
         )
-        self.hass = hass
         self.config_entry = config_entry
-        self.translations = {}
-
-        # Get configuration values
+        self.api = api
+        self.group = config_entry.options.get(
+            CONF_GROUP, config_entry.data.get(CONF_GROUP)
+        )
         self.region = config_entry.options.get(
-            CONF_REGION,
-            config_entry.data.get(CONF_REGION),
+            CONF_REGION, config_entry.data.get(CONF_REGION)
         )
         self.provider = config_entry.options.get(
-            CONF_PROVIDER,
-            config_entry.data.get(CONF_PROVIDER),
+            CONF_PROVIDER, config_entry.data.get(CONF_PROVIDER)
         )
-        self.group = config_entry.options.get(
-            CONF_GROUP,
-            config_entry.data.get(CONF_GROUP),
-        )
-
-        if not self.region:
-            region_required_msg = (
-                "Region not set in configuration - this should not happen "
-                "with proper config flow"
-            )
-            region_error = "Region configuration is required"
-            LOGGER.error(region_required_msg)
-            raise ValueError(region_error)
-
-        if not self.provider:
-            provider_required_msg = (
-                "Provider not set in configuration - this should not happen "
-                "with proper config flow"
-            )
-            provider_error = "Provider configuration is required"
-            LOGGER.error(provider_required_msg)
-            raise ValueError(provider_error)
-
-        if not self.group:
-            group_required_msg = (
-                "Group not set in configuration - this should not happen "
-                "with proper config flow"
-            )
-            group_error = "Group configuration is required"
-            LOGGER.error(group_required_msg)
-            raise ValueError(group_error)
-
-        # Initialize with names first, then we'll update with IDs when we fetch data
         self.region_id = None
         self.provider_id = None
-        self._provider_name = ""  # Cache the provider name
-
-        # Use the provided API instance
-        self.api = api
-        # Note: We'll resolve IDs and update API during first data update
+        self._provider_name = None  # Cached provider name
 
     @property
     def event_name_map(self) -> dict:
@@ -146,24 +112,38 @@ class YasnoOutagesCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> None:
         """Fetch data from new Yasno API."""
-        await self.async_fetch_translations()
+        LOGGER.debug("Starting _async_update_data")
+        try:
+            await self.async_fetch_translations()
 
-        # Resolve IDs if not already resolved
-        if self.region_id is None or self.provider_id is None:
-            await self._resolve_ids()
+            # Resolve IDs if not already resolved
+            if self.region_id is None or self.provider_id is None:
+                await self._resolve_ids()
 
-            # Update API with resolved IDs
-            self.api = YasnoOutagesApi(
-                region_id=self.region_id,
-                provider_id=self.provider_id,
-                group=self.group,
+                # Update API with resolved IDs
+                self.api = YasnoOutagesApi(
+                    region_id=self.region_id,
+                    provider_id=self.provider_id,
+                    group=self.group,
+                )
+
+            # Fetch outages data (now async with aiohttp, not blocking)
+            await self.api.fetch_data()
+
+            # Sync events to external calendar if configured
+            await self.async_sync_events_to_calendar()
+            LOGGER.debug("Calendar sync completed")
+
+            # Schedule a delayed sync in case calendar wasn't ready yet
+            calendar_entity = self.config_entry.options.get(
+                CONF_CALENDAR, self.config_entry.data.get(CONF_CALENDAR)
             )
-
-        # Fetch outages data (now async with aiohttp, not blocking)
-        await self.api.fetch_data()
-
-        # Sync events to external calendar if configured
-        await self.async_sync_events_to_calendar()
+            if calendar_entity:
+                self.hass.loop.call_later(10, self._delayed_sync)
+                self.hass.loop.call_later(30, self._delayed_sync)
+                self.hass.loop.call_later(60, self._delayed_sync)
+        except Exception:
+            LOGGER.exception("Error in _async_update_data")
 
     async def async_fetch_translations(self) -> None:
         """Fetch translations."""
@@ -292,12 +272,15 @@ class YasnoOutagesCoordinator(DataUpdateCoordinator):
         event_type = event.event_type.value
         summary = self.event_name_map.get(event_type)
 
+        # Generate stable UID based on event time and group
+        uid = f"{self.group}-{int(event.start.timestamp())}"
+
         output = CalendarEvent(
             summary=summary,
             start=event.start,
             end=event.end,
             description=event_type,
-            uid=event_type,
+            uid=uid,
         )
         LOGGER.debug("Calendar Event: %s", output)
         return output
@@ -306,11 +289,12 @@ class YasnoOutagesCoordinator(DataUpdateCoordinator):
         if not event:
             return STATE_NORMAL
 
-        # Map event types to states using uid field
-        if event.uid == OutageEventType.DEFINITE.value:
+        # Event state is determined by whether it's a definite outage
+        # Check description field which contains the event type
+        if event.description == OutageEventType.DEFINITE.value:
             return STATE_OUTAGE
 
-        LOGGER.warning("Unknown event type: %s", event.uid)
+        LOGGER.warning("Unknown event type: %s", event.description)
         return STATE_NORMAL
 
     def _simplify_provider_name(self, provider_name: str) -> str:
@@ -323,121 +307,155 @@ class YasnoOutagesCoordinator(DataUpdateCoordinator):
         return provider_name
 
     async def async_sync_events_to_calendar(self) -> None:
-        """Sync events to external calendar if configured."""
+        """Sync events to calendar."""
+        LOGGER.info("=== STARTING CALENDAR SYNC ===")
+
+        # Continue with normal sync logic...
         calendar_entity = self.config_entry.options.get(
             CONF_CALENDAR,
             self.config_entry.data.get(CONF_CALENDAR),
         )
+        LOGGER.debug("Calendar entity: %r", calendar_entity)
+        LOGGER.debug("Calendar entity from config: %s", calendar_entity)
 
         if not calendar_entity:
             LOGGER.debug("No calendar entity configured for sync")
             return
 
         try:
-            LOGGER.debug("Syncing events to calendar: %s", calendar_entity)
-
-            # Get events for today and tomorrow + a week ahead
             now = dt_utils.now()
-            end_date = now + datetime.timedelta(days=8)
+            end_date = now + timedelta(days=8)
             events = self.get_events_between(now, end_date)
 
-            # Get the calendar service
-            if "calendar" not in self.hass.services.async_services():
-                LOGGER.warning("Calendar service not available")
+            LOGGER.info(
+                "Syncing %d events to calendar %s", len(events), calendar_entity
+            )
+
+            # Get calendar object
+            calendar_obj = None
+            entity = self.hass.states.get(calendar_entity)
+            LOGGER.debug("Calendar entity state: %s", entity)
+            if entity:
+                calendar_obj = self.hass.data["calendar"].get_entity(calendar_entity)
+                LOGGER.debug("Calendar object from get_entity: %s", calendar_obj)
+
+            if not calendar_obj:
+                LOGGER.debug("Calendar object for %s not found", calendar_entity)
                 return
 
-            # Get existing events from the calendar
-            try:
-                existing_events = await self._get_calendar_events(
-                    calendar_entity, now, end_date
-                )
-            except Exception:  # noqa: BLE001
-                LOGGER.debug("Could not retrieve existing calendar events")
-                existing_events = []
+            LOGGER.debug("Calendar object type: %s", type(calendar_obj))
+            LOGGER.debug(
+                "Calendar object has async_get_events: %s",
+                hasattr(calendar_obj, "async_get_events"),
+            )
 
-            # Create events in the calendar (skip duplicates)
+            # Clean up old events first
+            LOGGER.debug("About to call cleanup for %d events", len(events))
+            await self._cleanup_old_events(calendar_obj, events)
+            LOGGER.debug("Cleanup completed")
+
+            # Sync new events
             for event in events:
-                # Check if event already exists
-                if not self._event_exists(event, existing_events):
-                    await self._create_calendar_event(calendar_entity, event)
-                else:
-                    LOGGER.debug("Event already exists, skipping: %s", event.summary)
+                await self._sync_event_to_calendar(calendar_obj, event)
 
         except Exception:
             LOGGER.exception("Failed to sync events to calendar")
 
-    async def _get_calendar_events(
-        self,
-        calendar_entity: str,
-        start_date: datetime.datetime,
-        end_date: datetime.datetime,
-    ) -> list[dict]:
-        """Get events from the external calendar."""
-        try:
-            # Use calendar.get_events service to fetch existing events
-            response = await self.hass.services.async_call(
-                "calendar",
-                "get_events",
-                {
-                    "entity_id": calendar_entity,
-                    "duration": {
-                        "days": (end_date - start_date).days + 1,
-                    },
-                },
-                return_response=True,
-            )
-            events = response.get(calendar_entity, {}).get("events", [])
-            LOGGER.debug("Retrieved %d existing events from calendar", len(events))
-        except Exception:  # noqa: BLE001
-            LOGGER.debug("Could not fetch events from calendar")
-            return []
-        else:
-            return events
-
-    def _event_exists(self, event: CalendarEvent, existing_events: list[dict]) -> bool:
-        """Check if event already exists in the calendar."""
-        # Match by start time and summary (allows for slight time variations)
-        for existing in existing_events:
-            existing_start = existing.get("start")
-            existing_summary = existing.get("summary", "")
-
-            if existing_start and existing_summary == event.summary:
-                # Compare times (allow tolerance for time differences)
-                try:
-                    if isinstance(existing_start, str):
-                        existing_dt = dt_utils.parse_datetime(existing_start)
-                    else:
-                        existing_dt = existing_start
-
-                    if (
-                        existing_dt
-                        and abs((existing_dt - event.start).total_seconds())
-                        < CALENDAR_SYNC_TIME_TOLERANCE
-                    ):
-                        return True
-                except Exception:  # noqa: BLE001
-                    LOGGER.debug("Could not compare event times")
-                    continue
-
-        return False
-
-    async def _create_calendar_event(
-        self, calendar_entity: str, event: CalendarEvent
+    async def _cleanup_old_events(
+        self, calendar_obj: Any, current_events: list[CalendarEvent]
     ) -> None:
-        """Create an event in the external calendar."""
+        """Clean up old Yasno events from calendar."""
+        LOGGER.debug("Starting cleanup of old Yasno events")
         try:
-            # Use calendar service to create event
-            await self.hass.services.async_call(
-                "calendar",
-                "create_event",
-                {
-                    "entity_id": calendar_entity,
-                    "summary": event.summary,
-                    "description": event.description,
-                    "start_date_time": event.start.isoformat(),
-                    "end_date_time": event.end.isoformat(),
-                },
+            # Get all events from calendar for the next week
+            now = dt_utils.now()
+            end_date = now + timedelta(days=8)
+            try:
+                all_events = await calendar_obj.async_get_events(
+                    self.hass, now, end_date
+                )
+                LOGGER.debug(
+                    "Successfully retrieved %d events from calendar",
+                    len(all_events),
+                )
+            except (AttributeError, TypeError, ValueError):
+                LOGGER.exception("Failed to get events from calendar")
+                return
+            for cal_event in all_events[:5]:  # Log first 5 events for debugging
+                LOGGER.debug(
+                    "Calendar event: uid=%s, summary=%s, description=%s",
+                    cal_event.uid,
+                    cal_event.summary,
+                    getattr(cal_event, "description", None),
+                )
+
+            # Create set of current Yasno event signatures
+            # (summary + start time + end time)
+            current_signatures = {
+                (event.summary, event.start, event.end) for event in current_events
+            }
+
+            LOGGER.debug(
+                "Found %d total events in calendar, %d current Yasno events",
+                len(all_events),
+                len(current_signatures),
             )
-            LOGGER.debug("Created event in calendar: %s", event.summary)
-        except Exception:  # noqa: BLE001
-            LOGGER.debug("Could not create event")
+
+            deleted_count = 0
+            yasno_events_found = 0
+            for cal_event in all_events:
+                # Check if this is a Yasno event (has our summary and description)
+                yasno_summary = self.event_name_map.get(EVENT_NAME_OUTAGE)
+                yasno_description = OutageEventType.DEFINITE.value
+                event_desc = getattr(cal_event, "description", None)
+                is_yasno_event = (
+                    cal_event.summary == yasno_summary
+                    and event_desc == yasno_description
+                )
+
+                if is_yasno_event:
+                    yasno_events_found += 1
+                    # For Yasno events, we delete ALL of them and recreate fresh
+                    # This prevents accumulation of duplicates
+                    with suppress(HomeAssistantError, ValueError):
+                        await calendar_obj.async_delete_event(cal_event.uid)
+                        LOGGER.debug("Deleted Yasno event: %s", cal_event.uid)
+                        deleted_count += 1
+
+            LOGGER.debug(
+                "Yasno events analysis: found %d Yasno events, deleted %d old ones",
+                yasno_events_found,
+                deleted_count,
+            )
+
+        except Exception:
+            LOGGER.exception("Failed to cleanup old events")
+
+    async def _sync_event_to_calendar(
+        self, calendar_obj: Any, event: CalendarEvent
+    ) -> None:
+        """Sync a single event to the external calendar."""
+        try:
+            # Try to create the event
+            await calendar_obj.async_create_event(
+                summary=event.summary,
+                description=event.description,
+                dtstart=event.start,
+                dtend=event.end,
+                uid=event.uid,
+            )
+            LOGGER.debug(
+                "Synced event to calendar: %s (uid: %s)", event.summary, event.uid
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            LOGGER.debug(
+                "Could not sync event to calendar: %s (uid: %s) - %s",
+                event.summary,
+                event.uid,
+                exc,
+                exc_info=True,
+            )
+
+    def _delayed_sync(self) -> None:
+        """Delayed sync attempt for calendar events."""
+        self.hass.create_task(self.async_sync_events_to_calendar())

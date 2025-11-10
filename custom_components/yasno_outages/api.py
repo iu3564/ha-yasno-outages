@@ -3,6 +3,7 @@
 import datetime
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import Enum
 from typing import Literal
 
@@ -30,7 +31,7 @@ def minutes_to_time(
     mins = minutes % 60
     # Handle end of day (24:00) - use midnight of next day
     if hours == 24:  # noqa: PLR2004
-        tomorrow = date + datetime.timedelta(days=1)
+        tomorrow = date + timedelta(days=1)
         return tomorrow.replace(
             hour=0,
             minute=0,
@@ -234,7 +235,7 @@ class YasnoOutagesApi:
 
     def get_current_event(self, at: datetime.datetime) -> OutageEvent | None:
         """Get the current event."""
-        all_events = self.get_events(at, at + datetime.timedelta(days=1))
+        all_events = self.get_events(at, at + timedelta(days=1))
         for event in all_events:
             if event.start <= at < event.end:
                 return event

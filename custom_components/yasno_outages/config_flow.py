@@ -12,8 +12,6 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
-    EntitySelector,
-    EntitySelectorConfig,
     SelectSelector,
     SelectSelectorConfig,
 )
@@ -117,14 +115,14 @@ def build_calendar_schema(
     config_entry: ConfigEntry | None,
 ) -> vol.Schema:
     """Build the schema for the calendar selection step."""
+    default_calendar = get_config_value(config_entry, CONF_CALENDAR, "")
+
     return vol.Schema(
         {
             vol.Optional(
                 CONF_CALENDAR,
-                default=get_config_value(config_entry, CONF_CALENDAR),
-            ): EntitySelector(
-                EntitySelectorConfig(domain="calendar"),
-            ),
+                default=default_calendar,
+            ): str,
         },
     )
 
@@ -213,12 +211,13 @@ class YasnoOutagesOptionsFlow(OptionsFlow):
         if user_input is not None:
             LOGGER.debug("Calendar selected: %s", user_input)
             self.data.update(user_input)
-            # Update entry title along with options
+            # Update entry options along with title
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
                 title=build_entry_title(self.data),
+                options=self.data,
             )
-            return self.async_create_entry(title="", data=self.data)
+            return self.async_abort(reason="reconfigure_successful")
 
         return self.async_show_form(
             step_id="calendar",
