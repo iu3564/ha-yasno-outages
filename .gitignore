@@ -14,6 +14,9 @@ coverage.xml
 # macOS
 .DS_Store
 
+# NFS artifacts
+.nfs.*
+
 # Home Assistant configuration
 config/*
 !config/configuration.yaml
